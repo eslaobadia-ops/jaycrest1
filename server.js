@@ -8,90 +8,16 @@ const { Pool } = pkg;
 const app = express();
 app.use(express.json());
 
-// ================== DATABASE CONNECTION ==================
+// ================== DATABASE ==================
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// ================== INITIALIZE DATABASE ==================
-async function initDatabase() {
-  const sql = `
-  CREATE TABLE IF NOT EXISTS users (
-    id SERIAL PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    role TEXT CHECK (role IN ('student','lecturer','admin')) NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS students (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    matric_no TEXT UNIQUE NOT NULL,
-    first_name TEXT NOT NULL,
-    last_name TEXT NOT NULL,
-    department TEXT,
-    level INTEGER,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS lecturers (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
-    staff_id TEXT UNIQUE NOT NULL,
-    first_name TEXT NOT NULL,
-    last_name TEXT NOT NULL,
-    department TEXT,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  );
-
-  CREATE TABLE IF NOT EXISTS courses (
-    id SERIAL PRIMARY KEY,
-    course_code TEXT UNIQUE NOT NULL,
-    course_title TEXT NOT NULL,
-    unit INTEGER NOT NULL,
-    department TEXT,
-    level INTEGER,
-    semester TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS course_registrations (
-    id SERIAL PRIMARY KEY,
-    student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
-    course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
-    session TEXT,
-    semester TEXT,
-    UNIQUE (student_id, course_id)
-  );
-
-  CREATE TABLE IF NOT EXISTS results (
-    id SERIAL PRIMARY KEY,
-    student_id INTEGER REFERENCES students(id) ON DELETE CASCADE,
-    course_id INTEGER REFERENCES courses(id) ON DELETE CASCADE,
-    score INTEGER,
-    grade TEXT,
-    grade_point NUMERIC(3,2),
-    session TEXT,
-    semester TEXT
-  );
-  `;
-
-  await pool.query(sql);
-  console.log("✅ Database initialized");
-}
-
-initDatabase().catch(err => {
-  console.error("❌ Database init failed:", err);
-  process.exit(1);
-});
-
 // ================== JWT MIDDLEWARE ==================
 function auth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header) {
-    return res.status(401).json({ error: "No token provided" });
-  }
+  if (!header) return res.status(401).json({ error: "No token provided" });
 
   const token = header.split(" ")[1];
 
@@ -102,3 +28,76 @@ function auth(req, res, next) {
     res.status(401).json({ error: "Invalid token" });
   }
 }
+
+// ================== ROUTES ==================
+app.get("/", (req, res) => {
+  res.json({ status: "Jaycrest backend running" });
+});
+
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, password, role } = req.body;
+    const hash = await bcrypt.hash(password, 10);
+
+    const result = await pool.query(
+      `INSERT INTO users (email, password_hash, role)
+       VALUES ($1,$2,$3)
+       RETURNING id,email,role`,
+      [email, hash, role]
+    );
+
+    res.status(201).json(result.rows[0]);
+  } catch (e) {
+    res.status(400).json({ error: "Registration failed" });
+  }
+});
+
+app.post("/api/auth/login", async (req, res) => {
+  const { email, password } = req.body;
+
+  const result = await pool.query(
+    "SELECT * FROM users WHERE email=$1",
+    [email]
+  );
+
+  if (!result.rows.length)
+    return res.status(401).json({ error: "Invalid credentials" });
+
+  const user = result.rows[0];
+  const ok = await bcrypt.compare(password, user.password_hash);
+  if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+  const token = jwt.sign(
+    { id: user.id, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: "1d" }
+  );
+
+  res.json({ token });
+});
+
+// ================== INIT DB + START SERVER ==================
+async function startServer() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL,
+        role TEXT NOT NULL
+      );
+    `);
+
+    console.log("✅ Database initialized");
+
+    const PORT = process.env.PORT || 3000;
+    app.listen(PORT, () => {
+      console.log(`🚀 Server running on port ${PORT}`);
+    });
+  } catch (err) {
+    console.error("❌ Startup failed", err);
+    process.exit(1);
+  }
+}
+
+startServer();
